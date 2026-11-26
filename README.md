@@ -7,7 +7,9 @@ Streamlit dashboard that red-teams an AI chatbot and analyses every reply with a
 - 23 attacks: Prompt Injection, Jailbreak, System Prompt Extraction, Sensitive Data Leakage, Harmful Content Generation (+ custom attacks)
 - Built-in Judge: Successful/Failed verdict, severity (Critical/High/Medium/Low/Safe), explanation and detection signals
 - Optional AI second opinion using the same target model
-- Chat tab: talk to the target chatbot directly (same model + system prompt), with automatic secret-leak flagging
+- Chat tab: talk to the target chatbot directly, send attacks from the library, see judge verdicts and secret-leak flags
+- Interactive dashboard: live attack feed, quick scan, radar chart, severity filters + search, cards/table view, per-attack retest
+- Defence presets (Weak / Balanced / Strict / Custom) and a run-comparison chart to prove a defence works
 - Overall risk score (0-100), colour indicators, HTML/JSON/CSV reports
 
 ## Run
