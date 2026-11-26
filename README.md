@@ -3,7 +3,7 @@
 Streamlit dashboard that red-teams an AI chatbot and analyses every reply with a **built-in AI Judge Engine** (no external judge model needed).
 
 ## Features
-- Configure only the chatbot under test: Ollama, LM Studio, OpenAI, Claude, Gemini, Groq, any OpenAI-compatible API, or a built-in **Demo** bot
+- Configure only the chatbot under test: OpenAI, Claude, Gemini, Groq, any OpenAI-compatible API (cloud or local server), or a built-in **Demo** bot
 - 23 attacks: Prompt Injection, Jailbreak, System Prompt Extraction, Sensitive Data Leakage, Harmful Content Generation (+ custom attacks)
 - Built-in Judge: Successful/Failed verdict, severity (Critical/High/Medium/Low/Safe), explanation and detection signals
 - Optional AI second opinion using the same target model

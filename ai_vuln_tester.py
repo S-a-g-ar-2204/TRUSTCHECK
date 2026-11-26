@@ -5,7 +5,7 @@ Streamlit dashboard that attacks a chatbot with a library of red-team prompts an
 analyses every reply with a BUILT-IN AI Judge Engine (no external judge model needed).
 
 You only configure ONE model: the chatbot you want to test.
-  Local : Ollama, LM Studio
+  Local : any local OpenAI-compatible server (e.g. LM Studio)
   Cloud : OpenAI, Claude, Gemini, Groq, any OpenAI-compatible API (OpenRouter, ...)
   Demo  : a simulated vulnerable bot (no model or key needed) to preview the dashboard
 
@@ -90,9 +90,7 @@ def h(s):
 # PROVIDERS
 # ----------------------------------------------------------------------------
 PROVIDERS = {
-    "Ollama": {"mode": "Local LLM", "kind": "ollama", "base_url": "http://localhost:11434",
-               "model": "llama3.2", "needs_key": False, "env": ""},
-    "LM Studio": {"mode": "Local LLM", "kind": "openai", "base_url": "http://localhost:1234/v1",
+    "Local server (OpenAI-compatible)": {"mode": "Local LLM", "kind": "openai", "base_url": "http://localhost:1234/v1",
                   "model": "local-model", "needs_key": False, "env": ""},
     "OpenAI": {"mode": "Cloud LLM", "kind": "openai", "base_url": "https://api.openai.com/v1",
                "model": "gpt-4o-mini", "needs_key": True, "env": "OPENAI_API_KEY"},
@@ -148,13 +146,7 @@ def call_llm(cfg, user_prompt, system_prompt="", temperature=0.2, max_tokens=700
     msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + \
            [{"role": "user", "content": user_prompt}]
     try:
-        if kind == "ollama":
-            r = requests.post(f"{base}/api/chat", timeout=timeout, json={
-                "model": model, "messages": msgs, "stream": False,
-                "options": {"temperature": temperature, "num_predict": max_tokens}})
-            r.raise_for_status()
-            return r.json()["message"]["content"]
-        if kind == "openai":  # OpenAI, Groq, LM Studio, OpenRouter, ...
+        if kind == "openai":  # OpenAI, Groq, local servers, OpenRouter, ...
             headers = {"Authorization": f"Bearer {key}"} if key else {}
             r = requests.post(f"{base}/chat/completions", headers=headers, timeout=timeout, json={
                 "model": model, "messages": msgs, "temperature": temperature, "max_tokens": max_tokens})
