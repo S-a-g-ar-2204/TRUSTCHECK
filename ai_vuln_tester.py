@@ -100,8 +100,8 @@ def h(s):
 # PROVIDERS
 # ----------------------------------------------------------------------------
 PROVIDERS = {
-    "Local server (OpenAI-compatible)": {"mode": "Local LLM", "kind": "openai", "base_url": "http://localhost:1234/v1",
-                  "model": "local-model", "needs_key": False, "env": ""},
+    "Local server (OpenAI-compatible)": {"mode": "Local LLM", "kind": "openai", "base_url": "http://127.0.0.1:11434/v1",
+                  "model": "", "needs_key": False, "env": ""},
     "OpenAI": {"mode": "Cloud LLM", "kind": "openai", "base_url": "https://api.openai.com/v1",
                "model": "gpt-4o-mini", "needs_key": True, "env": "OPENAI_API_KEY"},
     "Anthropic Claude": {"mode": "Cloud LLM", "kind": "anthropic", "base_url": "https://api.anthropic.com/v1",
@@ -151,6 +151,7 @@ def demo_reply(prompt, system_prompt):
 def call_llm(cfg, user_prompt, system_prompt="", temperature=0.2, max_tokens=700, timeout=90, history=None):
     """Chat request to any supported provider; returns the reply text. history = earlier turns (optional)."""
     kind, base, model, key = cfg["kind"], cfg["base_url"].rstrip("/"), cfg["model"], cfg.get("api_key", "")
+    timeout = cfg.get("timeout") or timeout
     if kind == "demo":
         return demo_reply(user_prompt, system_prompt)
     convo = list(history or []) + [{"role": "user", "content": user_prompt}]
@@ -185,11 +186,39 @@ def call_llm(cfg, user_prompt, system_prompt="", temperature=0.2, max_tokens=700
             return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
         raise LLMError(f"Unknown provider kind: {kind}")
     except requests.HTTPError as e:
-        raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:300]}")
+        code = e.response.status_code
+        hint = (" → Model not found on this server. Click 'Load models' in the sidebar and pick one." if code == 404 else
+                " → Check the API key." if code in (401, 403) else
+                " → Rate limit reached. Wait a minute and retry." if code == 429 else "")
+        raise LLMError(f"HTTP {code}: {e.response.text[:250]}{hint}")
+    except requests.Timeout:
+        raise LLMError(f"Timed out after {timeout}s. Local models can be slow on first use. Try again or lower 'Max response tokens'.")
+    except requests.ConnectionError:
+        raise LLMError(f"Cannot reach {base}. Is the server running? If the URL uses 'localhost', try 127.0.0.1 instead.")
     except requests.RequestException as e:
         raise LLMError(f"Connection problem: {e}")
     except (KeyError, IndexError, ValueError) as e:
         raise LLMError(f"Unexpected response format: {e}")
+
+
+def list_models(cfg):
+    """Ask an OpenAI-compatible server which models it has (so you never mistype a model name)."""
+    if cfg["kind"] != "openai":
+        raise LLMError("Model listing is only available for OpenAI-compatible servers.")
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg.get("api_key") else {}
+    try:
+        r = requests.get(cfg["base_url"].rstrip("/") + "/models", headers=headers, timeout=20)
+        r.raise_for_status()
+        names = sorted(m["id"] for m in r.json()["data"])
+    except requests.ConnectionError:
+        raise LLMError(f"Cannot reach {cfg['base_url']}. Is the server running? Try 127.0.0.1 instead of localhost.")
+    except requests.HTTPError as e:
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+    except (requests.RequestException, KeyError, TypeError, ValueError) as e:
+        raise LLMError(f"Could not read the model list: {e}")
+    if not names:
+        raise LLMError("The server returned no models. Download or load a model first.")
+    return names
 
 
 # ----------------------------------------------------------------------------
@@ -687,30 +716,52 @@ def build_html_report(meta, results):
 # SIDEBAR : target configuration only
 # ----------------------------------------------------------------------------
 def model_config_ui():
-    mode = st.radio("Model type", MODES, index=1, horizontal=True, key="mode",
-                    help="Demo = built-in simulated bot, no model or key needed.")
+    mode = st.radio("Model type", MODES, index=0, horizontal=True, key="mode",
+                    help="Local = a model on your computer. Cloud = an API with a key. Demo = built-in simulated bot.")
     names = [n for n, p in PROVIDERS.items() if p["mode"] == mode]
     provider = st.selectbox("Provider", names, key=f"prov_{mode}")
     p = PROVIDERS[provider]
     if p["kind"] == "demo":
-        st.info("Simulated vulnerable chatbot. Use it to preview the dashboard without any model or API key.")
-        return {"kind": "demo", "base_url": "", "model": "demo-bot", "api_key": "",
+        st.warning("🧪 DEMO MODE: a simulated bot is being tested, not your own model. Switch to Local or Cloud to test a real model.")
+        return {"kind": "demo", "base_url": "", "model": "demo-bot", "api_key": "", "mode": mode,
                 "label": "Demo / simulated bot", "needs_key": False}
-    base_url = st.text_input("Base URL", p["base_url"], key=f"url_{provider}")
-    model = st.text_input("Model name", p["model"], key=f"model_{provider}")
+    base_url = st.text_input("Base URL", p["base_url"], key=f"url_{provider}",
+                             help="Local servers: use 127.0.0.1 rather than localhost. LM Studio's default is http://127.0.0.1:1234/v1.")
     api_key = ""
     if p["needs_key"]:
         api_key = st.text_input("API key", type="password", key=f"key_{provider}",
                                 help=f"Or set the {p['env']} environment variable.") or os.environ.get(p["env"], "")
-    cfg = {"kind": p["kind"], "base_url": base_url, "model": model, "api_key": api_key,
-           "label": f"{provider} / {model}", "needs_key": p["needs_key"]}
-    if st.button("🔌 Test connection"):
+    cfg = {"kind": p["kind"], "base_url": base_url, "model": "", "api_key": api_key, "mode": mode,
+           "needs_key": p["needs_key"], "timeout": 240 if mode == "Local LLM" else 90}
+    mkey = f"models_{provider}_{base_url}"
+    if p["kind"] == "openai" and st.button("🔄 Load models from server", key=f"load_{provider}",
+                                           help="Lists the models the server has, so you can pick one instead of typing it."):
         try:
-            with st.spinner("Contacting model..."):
-                reply = call_llm(cfg, "Reply with the single word: OK", max_tokens=20, timeout=45)
-            st.success(f"Connected ✓  Model said: {reply.strip()[:50]}")
+            with st.spinner("Asking the server for its models..."):
+                st.session_state[mkey] = list_models(cfg)
+            st.toast(f"Found {len(st.session_state[mkey])} model(s)", icon="✅")
         except LLMError as e:
+            st.session_state.pop(mkey, None)
             st.error(str(e))
+    loaded = st.session_state.get(mkey)
+    if p["kind"] == "openai" and loaded:
+        model = st.selectbox("Model name", loaded, accept_new_options=True, key=f"modelsel_{provider}",
+                             help="Loaded from the server. You can also type a different name.") or ""
+    else:
+        model = st.text_input("Model name", p["model"], key=f"model_{provider}",
+                              placeholder="Click 'Load models' or type the exact model name" if not p["model"] else "")
+    cfg["model"] = model.strip()
+    cfg["label"] = f"{provider} / {cfg['model'] or '(no model)'}"
+    if st.button("🔌 Test connection", key=f"ping_{provider}"):
+        if not cfg["model"]:
+            st.error("Enter or pick a model name first.")
+        else:
+            try:
+                with st.spinner("Contacting model..."):
+                    reply = call_llm({**cfg, "timeout": 60}, "Reply with the single word: OK", max_tokens=20)
+                st.success(f"Connected ✓  Model said: {reply.strip()[:50]}")
+            except LLMError as e:
+                st.error(str(e))
     return cfg
 
 
@@ -761,6 +812,14 @@ with st.sidebar:
                           help="Also asks the target model to review each result and keeps the more severe verdict. Slower, uses extra API calls.")
 canaries = [c.strip() for c in canary_text.split(",") if c.strip()]
 
+# When the target (mode / URL / model) changes, old results belong to a different model: clear them.
+_sig = (target_cfg["kind"], target_cfg["base_url"], target_cfg["model"])
+if st.session_state.get("target_sig") not in (None, _sig):
+    for _k in ("results", "meta", "tests_used", "chat"):
+        st.session_state.pop(_k, None)
+    st.toast(f"Target changed to {target_cfg['label']}. Old results were cleared (run history is kept).", icon="🧹")
+st.session_state["target_sig"] = _sig
+
 # ----------------------------------------------------------------------------
 # HERO + TABS
 # ----------------------------------------------------------------------------
@@ -769,6 +828,11 @@ st.markdown(h("""<div class="hero"><h1>🛡️ TrustCheck</h1>
 <span class="pill">💉 Prompt Injection</span><span class="pill">🔓 Jailbreak</span><span class="pill">📜 Prompt Extraction</span>
 <span class="pill">🕵️ Data Leakage</span><span class="pill">☣️ Harmful Content</span></div>"""), unsafe_allow_html=True)
 st.caption("⚠️ Only test models and applications you own or are explicitly authorised to test.")
+if target_cfg["kind"] == "demo":
+    _strip = chip("🧪 DEMO MODE", "#f59e0b") + "Simulated bot, <b>not</b> your own model. Choose Local LLM or Cloud LLM in the sidebar to test a real one."
+else:
+    _strip = chip(f"🎯 {target_cfg['mode']}", "#6366f1") + f"Testing <b>{html.escape(target_cfg['label'])}</b>"
+st.markdown(h(f'<div class="card" style="height:auto;padding:10px 16px;margin-bottom:10px">{_strip}</div>'), unsafe_allow_html=True)
 
 hs = st.columns(3)
 for col, (n, t, d) in zip(hs, [(1, "Configure", "Pick the target model and a defence preset in the sidebar"),
@@ -832,6 +896,8 @@ with tab_scan:
     if to_run:
         if target_cfg["needs_key"] and not target_cfg["api_key"]:
             st.error("Please enter the API key for the target model in the sidebar.")
+        elif not target_cfg["model"]:
+            st.error("Please pick or type a model name in the sidebar (try 'Load models from server').")
         else:
             results = run_tests(to_run, target_cfg, system_prompt, canaries, temperature, max_tokens, ai_second, feed_slot)
             feed_slot.empty()
@@ -915,21 +981,8 @@ with tab_scan:
                             st.toast(f"{r['id']} retested: {results[idx]['verdict']} / {results[idx]['severity']}", icon="🔁")
                             st.rerun()
 
-        # ---- 4. COMPARE RUNS ------------------------------------------------------
-        if hist:
-            section(4, "Compare runs", "Change the preset or model in the sidebar, scan again, and watch the score move")
-            hdf = pd.DataFrame(hist)
-            hdf.insert(0, "Run", [f"#{i + 1} {h_['Preset'].split(' ')[0]}" for i, h_ in enumerate(hist)])
-            c1, c2 = st.columns([3, 2])
-            c1.dataframe(hdf, hide_index=True, width="stretch",
-                         column_config={"Risk score": st.column_config.ProgressColumn("Risk score", min_value=0, max_value=100, format="%d")})
-            c2.bar_chart(hdf.set_index("Run")["Risk score"], color="#7c3aed")
-            if st.button("🧹 Clear run history"):
-                st.session_state["history"] = []
-                st.rerun()
-
         # ---- 5. DOWNLOAD ------------------------------------------------------------
-        section(5, "Download report", "Share the full findings")
+        section(4, "Download report", "Share the full findings")
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         d1, d2, d3 = st.columns(3)
         d1.download_button("⬇️ HTML report", build_html_report(meta, results), f"trustcheck_report_{stamp}.html",
@@ -940,6 +993,21 @@ with tab_scan:
         pd.DataFrame(results).drop(columns=["signals"], errors="ignore").to_csv(buf, index=False)
         d3.download_button("⬇️ CSV results", buf.getvalue(), f"trustcheck_results_{stamp}.csv", "text/csv",
                            width="stretch")
+
+    # ---- 4. COMPARE RUNS ------------------------------------------------------
+    hist = st.session_state.get("history", [])
+    if hist:
+        section(5, "Compare runs", "Change the preset or model in the sidebar, scan again, and watch the score move")
+        hdf = pd.DataFrame(hist)
+        hdf.insert(0, "Run", [f"#{i + 1} {h_['Preset'].split(' ')[0]}" for i, h_ in enumerate(hist)])
+        c1, c2 = st.columns([3, 2])
+        c1.dataframe(hdf, hide_index=True, width="stretch",
+                     column_config={"Risk score": st.column_config.ProgressColumn("Risk score", min_value=0, max_value=100, format="%d")})
+        c2.bar_chart(hdf.set_index("Run")["Risk score"], color="#7c3aed")
+        if st.button("🧹 Clear run history"):
+            st.session_state["history"] = []
+            st.rerun()
+
 
 # ============================================================================
 # TAB 2 : CHAT WITH TARGET (same model + system prompt as the scan)
@@ -974,6 +1042,8 @@ with tab_chat:
         msg, test = pending
         if target_cfg["needs_key"] and not target_cfg["api_key"]:
             st.error("Please enter the API key for the target model in the sidebar.")
+        elif not target_cfg["model"]:
+            st.error("Please pick or type a model name in the sidebar (try 'Load models from server').")
         else:
             with st.chat_message("user"):
                 st.text(msg)
